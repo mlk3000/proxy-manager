@@ -16,49 +16,38 @@ type node struct {
 }
 
 func main() {
-
 	db, err := sql.Open("sqlite", "nodes.db")
-
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
 	err = db.Ping()
 	if err != nil {
 		log.Fatal(err)
 	}
-	//sql.DB 实际上是一个管理数据库连接的句柄，内部负责连接池，而不是单条物理连接。
-	//而且 sql.Open() 不保证已经建立实际连接，所以我们再调用 Ping() 验证。
-
 	fmt.Println("database connected")
 
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS nodes(
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	name TEXT NOT NULL,
-	address TEXT NOT NULL,
-	region TEXT NOT NULL
-	)`)
+	cmd := `CREATE TABLE IF NOT EXISTS nodes(
+		ID INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		address TEXT NOT NULL,
+		region TEXT NOT NULL
+	)`
 
+	_, err = db.Exec(cmd)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	query := `
-		INSERT INTO nodes (name, address, region)
-		VALUES (?, ?, ?)
-	`
-
-	_, err = db.Exec(
-		query,
-		"JP-01",
-		"jp.example.net:443",
-		"JP",
-	)
+	//don't simply use fmt.Sprintf to form a cmd as it may cause sql injection
+	insertCmd := "INSERT INTO nodes(name,address,region) VALUES(?,?,?)"
+	_, err = db.Exec(insertCmd, "KR-01", "kr.example.com:443", "KR")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	rows, err := db.Query("SELECT id,name,address,region FROM nodes ORDER BY id")
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,25 +56,20 @@ func main() {
 	nodes := []node{}
 
 	for rows.Next() {
-		var temp node
-		err = rows.Scan(&temp.ID, &temp.Name, &temp.Address, &temp.Region)
+		node := node{}
+		err = rows.Scan(&node.ID, &node.Name, &node.Address, &node.Region)
+		//err here about conversion
 		if err != nil {
 			log.Fatal(err)
 		}
-		nodes = append(nodes, temp)
+		nodes = append(nodes, node)
 	}
-	//in case connection halt,row.Next() wont throw error
+	//err here about fetching next line
+	if rows.Err() != nil {
+		log.Fatal(rows)
+	}
 
-	if err = rows.Err(); err != nil {
-		log.Fatal(err)
-	}
 	for _, node := range nodes {
-		fmt.Printf(
-			"ID=%d Name=%s Address=%s Region=%s\n",
-			node.ID,
-			node.Address,
-			node.Name,
-			node.Region,
-		)
+		fmt.Println(node)
 	}
 }
