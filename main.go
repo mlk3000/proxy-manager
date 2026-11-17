@@ -2,15 +2,16 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type Node struct {
@@ -21,9 +22,7 @@ type Node struct {
 }
 
 type Server struct {
-	mu     sync.Mutex
-	nodes  []Node
-	nextID int
+	db *sql.DB
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
@@ -39,19 +38,24 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	input.ID = s.nextID
-	s.nextID++
+	cmd := `INSERT INTO nodes (name,address,region) VALUES (?,?,?)`
 
-	s.nodes = append(s.nodes, input)
-	s.mu.Unlock()
+	result, err := s.db.ExecContext(r.Context(), cmd, input.Name, input.Address, input.Region)
+	if err != nil {
+		log.Println("insert db error", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		log.Println("insert db error", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+	}
+	input.ID = int(id)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	err = json.NewEncoder(w).Encode(input)
-	if err != nil {
-		log.Println("encode error:", err)
-	}
+	json.NewEncoder(w).Encode(input)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -86,12 +90,41 @@ func debugWait(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	snapshot := append([]Node{}, s.nodes...)
-	s.mu.Unlock()
+	//	snapshot := append([]Node{}, s.nodes...)
+
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id,name,address,region FROM nodes ORDER BY id")
+
+	if err != nil {
+		log.Println("query error:", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	nodes := []Node{}
+	// 初始化为空但非 nil 的 slice，JSON 编码成 []；
+	// var nodes []node 初始化，如果没有 append 任何元素，会编码成 null
+	// 请求失败时返回[] 更符合API设计
+	for rows.Next() {
+		temp := Node{}
+		err = rows.Scan(&temp.ID, &temp.Name, &temp.Address, &temp.Region)
+		if err != nil {
+			log.Println("scan error:", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		nodes = append(nodes, temp)
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Println("rows error:", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	//w.WriteHeader(http.StatusOK)
-	err := json.NewEncoder(w).Encode(snapshot)
+	err = json.NewEncoder(w).Encode(nodes)
 	if err != nil {
 		log.Println("encode error", err)
 	}
@@ -103,23 +136,25 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid node ID!", http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
 
 	var result Node
-	found := false
 
-	for _, node := range s.nodes {
-		if node.ID == id {
-			result = node
-			found = true
-			break
-		}
-	}
-	s.mu.Unlock()
-	if !found {
-		http.Error(w, "id not found", http.StatusNotFound)
+	cmd := "SELECT * FROM nodes WHERE ID= ?"
+
+	err = s.db.QueryRowContext(r.Context(), cmd, id).Scan(&result.ID, &result.Name, &result.Address, &result.Region)
+
+	//two errs here:
+	if err == sql.ErrNoRows {
+		http.Error(w, "node not found", http.StatusNotFound)
 		return
 	}
+
+	if err != nil {
+		log.Println("query error:", err)
+		http.Error(w, "err", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
 	err = json.NewEncoder(w).Encode(result)
@@ -134,32 +169,61 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid node ID!", http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
+	//Previous two methods
+	//s.nodes = slices.Delete(s.nodes, index, index+1)
+	//s.nodes = append(s.nodes[:index], s.nodes[index+1:]...)
 
-	found := false
+	cmd := "DELETE FROM nodes WHERE id = ?"
 
-	for index, node := range s.nodes {
-		if node.ID == id {
-			s.nodes = slices.Delete(s.nodes, index, index+1)
-			//s.nodes = append(s.nodes[:index], s.nodes[index+1:]...)
-			found = true
-			break
-		}
-	}
-	s.mu.Unlock()
-	if !found {
-		http.Error(w, "id not found", http.StatusNotFound)
+	res, err := s.db.ExecContext(r.Context(), cmd, id)
+	//if line was not found, cmd will still work while deleting 0 lines
+
+	if err != nil {
+		log.Println("delete error", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
+
+	count, err := res.RowsAffected()
+	if err != nil {
+		log.Println("rows affected error")
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+
+	if count == 0 {
+		log.Println("No res")
+		http.Error(w, "no item", http.StatusNotFound)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
 
-	server := &Server{nodes: []Node{
-		{ID: 1, Name: "KR-01", Address: "kr.example.net:443", Region: "KR"},
-		{ID: 2, Name: "US-01", Address: "us.example.net:443", Region: "US"},
-	}, nextID: 3}
+	db, err := sql.Open("sqlite", "nodes.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer db.Close()
+	err = db.Ping()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS nodes(
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	address TEXT NOT NULL,
+	region TEXT NOT NULL
+	)`)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	server := &Server{db: db}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
@@ -177,4 +241,4 @@ func main() {
 	}
 	log.Fatal(customServer.ListenAndServe())
 	//http.ListenAndServe("127.0.0.1:8080", loggingMiddleware(mux))
-}
+}\
