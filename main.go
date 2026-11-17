@@ -241,4 +241,4 @@ func main() {
 	}
 	log.Fatal(customServer.ListenAndServe())
 	//http.ListenAndServe("127.0.0.1:8080", loggingMiddleware(mux))
-}\
+}
