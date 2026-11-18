@@ -206,7 +206,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	defer db.Close()
 	err = db.Ping()
 	if err != nil {
 		log.Fatal(err)
@@ -232,6 +231,7 @@ func main() {
 	mux.HandleFunc("GET /nodes/{id}", server.getNode)
 	mux.HandleFunc("DELETE /nodes/{id}", server.deleteNode)
 	mux.HandleFunc("GET /debug/wait", debugWait)
+	mux.HandleFunc("POST /nodes/batch-rename", server.renamePair)
 	//no need to add {} since ?arg can be parsed straightly
 	customServer := &http.Server{
 		Addr:              "127.0.0.1:8080",
